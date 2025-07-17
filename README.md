@@ -27,6 +27,7 @@ Now all you have to do is to wait until the transfer completes. There are some p
 Now suppose you have a server with the files spread across 4 different mount points. In this case, **jbodncp** can also do the job for you.
 Just specify multiple directory paths as command line arguments and see what happens:
 ````
+# Hint: use shell completions to avoid typing manually
 src$ jbodncp serve /pool/storage01/ /pool/storage02/ /pool/storage03/ /pool/storage04/
 ````
 Imagine that we only have 2 storage mount points on the destination server. Of course, that's not a problem either:
