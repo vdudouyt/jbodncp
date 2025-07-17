@@ -12,7 +12,6 @@ src$ jbodncp serve /pool/storage/
 Run the client on the opposite end:
 ```
 dst$ jbodncp download --auth 057g3vM9uqEsJn5iJ81NPQPap2diIaOu  --threads 16 http://src-ip:3000 /pool/storage/
-root@v351102:~/paraflow# ls -lh /tmp/3/
 [INFO] Downloading URL: http://src-ip:3000/download/00000/eroa9ahmzgp0 => /pool/storage/00000/eroa9ahmzgp0
 [INFO] Downloading URL: http://src-ip:3000/download/00000/1kr3rsxht9u1 => /pool/storage/00000/1kr3rsxht9u1
 [INFO] Downloading URL: http://src-ip:3000/download/00000/7ebrxgmvclfs => /pool/storage/00000/7ebrxgmvclfs
@@ -41,4 +40,4 @@ dst$ jbodncp download <...> http://src-ip:3000 /pool/storage01/ /pool/storage02/
 **jbodncp** obeys the following rules when working in JBOD mode to mitigate the stopped transfer artifacts problem:
 * If there are two or more files with the same relative path in different source locations, the one with maximal file size is getting served
 * Each time when downloading a file, we check if a file with the same relative path already exists in one of destination locations. So, we rewrite an already existing one rather than creating a new copy in another location (or do nothing if it's file size is equal to the orig)
-* In all another cases, we use the round robin principle to select a destination for each incoming file
+* In all another cases, we use the round robin principle to select a destination for each incoming file.
