@@ -9,6 +9,17 @@ pub struct RunArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SubCommand {
-    Serve { src_paths: Vec<String> },
-    Download { url: String, dst_paths: Vec<String>, #[arg(long)] auth: String, #[arg(long)] threads: u16 },
+    Serve {
+        src_paths: Vec<String>,
+        #[arg(long, default_value_t=3000)]
+        port: u16,
+    },
+    Download {
+        url: String,
+        dst_paths: Vec<String>,
+        #[arg(long)]
+        auth: String,
+        #[arg(long)]
+        threads: u16
+    },
 }

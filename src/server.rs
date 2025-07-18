@@ -66,13 +66,13 @@ async fn check_auth(State(state): State<AppState>, req: Request, next: Next) -> 
     }
 }
 
-async fn async_serve(state: AppState) {
+async fn async_serve(state: AppState, port: u16) {
     let app = Router::new()
         .route("/download/{*filename}", get(serve_large_file))
         .route("/list", get(get_file_list))
         .layer(from_fn_with_state(state.clone(), check_auth))
         .with_state(state.clone());
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+    let listener = tokio::net::TcpListener::bind(&format!("0.0.0.0:{}", port))
         .await
         .unwrap();
     info!("listening on {}", listener.local_addr().unwrap());
@@ -80,7 +80,7 @@ async fn async_serve(state: AppState) {
 
 }
 
-pub fn serve(src_paths: Vec<String>) {
+pub fn serve(src_paths: Vec<String>, port: u16) {
     let token: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(32)
@@ -97,5 +97,5 @@ pub fn serve(src_paths: Vec<String>) {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_io().enable_time()
         .build()
         .unwrap();
-    rt.block_on(async move { async_serve(state).await });
+    rt.block_on(async move { async_serve(state, port).await });
 }
