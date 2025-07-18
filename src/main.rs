@@ -8,12 +8,16 @@ use clap::Parser;
 use client::run_client;
 use server::serve;
 use crate::cli::SubCommand::*;
+use log::error;
 
 fn main() {
     logsy::set_echo(true);
     let args = cli::RunArgs::parse();
-    match args.cmd {
-        Serve { src_paths, port } => serve(src_paths, port),
-        Download { url, dst_paths, auth, threads } => run_client(&url, dst_paths, &auth, threads).unwrap(),
+    let result = match args.cmd {
+        Serve { src_paths, port } => Ok(serve(src_paths, port)),
+        Download { url, dst_paths, auth, threads } => run_client(&url, dst_paths, &auth, threads),
+    };
+    if let Err(err) = result {
+        error!("Operation failed: {:#}", err);
     }
 }
