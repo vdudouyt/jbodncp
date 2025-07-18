@@ -65,14 +65,13 @@ fn worker(state: Arc<Mutex<SharedState>>, settings: &WorkerSettings) {
 }
 
 fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, expected_size: u64) -> Result<()> {
-    info!("Downloading URL: {} => {}", download_url, dst_path.display());
-
     let exists = std::fs::exists(&dst_path).unwrap_or(false);
     if exists && std::fs::metadata(&dst_path)?.len() == expected_size {
         info!("File already completed: {}", dst_path.display());
         return Ok(());
     }
 
+    info!("Downloading URL: {} => {}", download_url, dst_path.display());
     if let Some(parent) = dst_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
