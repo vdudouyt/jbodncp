@@ -19,7 +19,7 @@ pub enum SubCommand {
         dst_paths: Vec<String>,
         #[arg(long)]
         auth: String,
-        #[arg(long)]
+        #[arg(long, default_value_t=16)]
         threads: u16
     },
 }
