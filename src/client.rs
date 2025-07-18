@@ -28,7 +28,7 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -
     let list = agent
         .get(&format!("{url}/list"))
         .header("Authorization", &format!("Bearer {auth}"))
-        .call()?.body_mut().read_to_string()?;
+        .call()?.body_mut().with_config().limit(u64::MAX).read_to_string()?;
     let queue: VecDeque<FileEntry> = serde_json::from_str(&list)?;
     let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue }));
     let worker_settings = WorkerSettings { endpoint: url.to_string(), auth: auth.to_string(), dst_paths };
