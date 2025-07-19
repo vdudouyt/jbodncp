@@ -21,7 +21,7 @@ pub enum SubCommand {
         auth: String,
         #[arg(long, default_value_t=16)]
         threads: u16,
-        #[arg(long, default_value_t=false)]
+        #[arg(long)]
         dry_run: bool,
     },
 }
