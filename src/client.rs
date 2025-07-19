@@ -24,11 +24,12 @@ struct WorkerSettings {
     endpoint: String,
     auth: String,
     dst_paths: Vec<String>,
+    dry_run: bool,
 }
 
 enum DlStatus { NothingToDo, Completed }
 
-pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -> Result<()> {
+pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16, dry_run: bool) -> Result<()> {
     info!("Fetching file list");
     let agent = ureq::agent();
     let list = agent
@@ -38,7 +39,7 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -
     let queue: VecDeque<FileEntry> = serde_json::from_str(&list)?;
     let files_matched = queue.len();
     let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue, downloaded: 0, errors: 0, files_seen: 0 }));
-    let worker_settings = WorkerSettings { endpoint: url.to_string(), auth: auth.to_string(), dst_paths };
+    let worker_settings = WorkerSettings { endpoint: url.to_string(), auth: auth.to_string(), dst_paths, dry_run };
     let mut workers: VecDeque<JoinHandle<()>> = VecDeque::new();
     for _ in 0..threads {
         let shared_state = shared_state.clone();
@@ -55,6 +56,9 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -
     }
     if state.errors > 0 {
         warn!("Some transfers were completed with errors");
+    }
+    if dry_run {
+        warn!("Dry run requested, so no downloads actually performed");
     }
     info!("Everything is done. Files seen: {} downloaded: {} errors: {}", state.files_seen, state.downloaded, state.errors);
     Ok(())
@@ -73,7 +77,7 @@ fn worker(state: Arc<Mutex<SharedState>>, settings: &WorkerSettings) {
         let download_url = format!("{}/download/{}", &settings.endpoint, item.relpath.display());
         let round_robin = || next_path().join(&item.relpath);
         let dst_path = jbod::find_file(&settings.dst_paths, &item.relpath).unwrap_or_else(round_robin);
-        let result = download(&agent, &settings.auth, &download_url, &dst_path, item.size);
+        let result = download(&agent, &settings.auth, &download_url, &dst_path, item.size, settings.dry_run);
         if let Err(err) = &result {
             error!("File download failed: {} {:#}", dst_path.display(), err);
         }
@@ -88,7 +92,7 @@ fn worker(state: Arc<Mutex<SharedState>>, settings: &WorkerSettings) {
     }
 }
 
-fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, expected_size: u64) -> Result<DlStatus> {
+fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, expected_size: u64, dry_run: bool) -> Result<DlStatus> {
     let exists = std::fs::exists(&dst_path).unwrap_or(false);
     if exists && std::fs::metadata(&dst_path)?.len() == expected_size {
         info!("File already completed: {}", dst_path.display());
@@ -96,6 +100,11 @@ fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, e
     }
 
     info!("Downloading URL: {} => {}", download_url, dst_path.display());
+
+    if dry_run {
+        return Ok(DlStatus::Completed);
+    }
+
     if let Some(parent) = dst_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
