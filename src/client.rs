@@ -14,6 +14,9 @@ use std::thread::JoinHandle;
 struct SharedState {
     counter: usize,
     queue: VecDeque<FileEntry>,
+    downloaded: u64,
+    errors: u64,
+    files_seen: u64,
 }
 
 #[derive(Clone)]
@@ -23,6 +26,8 @@ struct WorkerSettings {
     dst_paths: Vec<String>,
 }
 
+enum DlStatus { NothingToDo, Completed }
+
 pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -> Result<()> {
     info!("Fetching file list");
     let agent = ureq::agent();
@@ -31,7 +36,8 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -
         .header("Authorization", &format!("Bearer {auth}"))
         .call()?.body_mut().with_config().limit(u64::MAX).read_to_string()?;
     let queue: VecDeque<FileEntry> = serde_json::from_str(&list)?;
-    let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue }));
+    let files_matched = queue.len();
+    let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue, downloaded: 0, errors: 0, files_seen: 0 }));
     let worker_settings = WorkerSettings { endpoint: url.to_string(), auth: auth.to_string(), dst_paths };
     let mut workers: VecDeque<JoinHandle<()>> = VecDeque::new();
     for _ in 0..threads {
@@ -42,7 +48,15 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -
     while let Some(thread) = workers.pop_front() {
         thread.join().unwrap();
     }
-    info!("Everything is done");
+
+    let state = shared_state.lock().unwrap();
+    if state.files_seen != files_matched as u64 {
+        warn!("Some files were ignored. Files seen: {} matched: {}", state.files_seen, files_matched);
+    }
+    if state.errors > 0 {
+        warn!("Some transfers were completed with errors");
+    }
+    info!("Everything is done. Files seen: {} downloaded: {} errors: {}", state.files_seen, state.downloaded, state.errors);
     Ok(())
 }
 
@@ -60,17 +74,25 @@ fn worker(state: Arc<Mutex<SharedState>>, settings: &WorkerSettings) {
         let round_robin = || next_path().join(&item.relpath);
         let dst_path = jbod::find_file(&settings.dst_paths, &item.relpath).unwrap_or_else(round_robin);
         let result = download(&agent, &settings.auth, &download_url, &dst_path, item.size);
-        if let Err(err) = result {
+        if let Err(err) = &result {
             error!("File download failed: {} {:#}", dst_path.display(), err);
+        }
+
+        let mut state = state.lock().unwrap();
+        state.files_seen += 1;
+        match result {
+            Ok(DlStatus::Completed) => state.downloaded+=1,
+            Ok(DlStatus::NothingToDo) => {},
+            Err(_) => state.errors+=1,
         }
     }
 }
 
-fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, expected_size: u64) -> Result<()> {
+fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, expected_size: u64) -> Result<DlStatus> {
     let exists = std::fs::exists(&dst_path).unwrap_or(false);
     if exists && std::fs::metadata(&dst_path)?.len() == expected_size {
         info!("File already completed: {}", dst_path.display());
-        return Ok(());
+        return Ok(DlStatus::NothingToDo);
     }
 
     info!("Downloading URL: {} => {}", download_url, dst_path.display());
@@ -90,5 +112,5 @@ fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, e
     let file_size = std::fs::metadata(&dst_path)?.len();
     ensure!(file_size == expected_size,  "Filesize check failed: {expected_size} bytes expected, {file_size} received");
 
-    Ok(())
+    Ok(DlStatus::Completed)
 }
