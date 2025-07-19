@@ -29,4 +29,6 @@ pub struct DownloadConfig {
     pub dry_run: bool,
     #[arg(long)]
     pub group_by: Option<String>,
+    #[arg(long)]
+    pub group_by_preload: Option<String>,
 }

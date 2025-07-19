@@ -5,6 +5,7 @@ use crate::jbod;
 use crate::cli::DownloadConfig;
 use std::path::PathBuf;
 use log::*;
+use glob::glob;
 use regex::Regex;
 
 use std::fs::File;
@@ -31,6 +32,9 @@ struct WorkerSettings {
     dst_paths: Vec<String>,
     dry_run: bool,
     group_by: Option<Regex>,
+
+    // group by (preload)
+    index_preload: HashMap<String, PathBuf>,
 }
 
 enum DlStatus { NothingToDo, Completed }
@@ -53,8 +57,25 @@ pub fn run_client(args: DownloadConfig) -> Result<()> {
         HashMap::new()
     };
 
+    let index_preload = if let Some(wildcard) = &args.group_by_preload {
+        info!("Building directory index (--group-by-preload)");
+        let dirs: Vec<PathBuf> = glob(wildcard)?.filter_map(Result::ok).collect();
+        ensure!(dirs.len() == args.dst_paths.len(), "Glob passed into --group-by-preload doesn't matches specified dst_dir count");
+
+        let dirs_str: Vec<String> = dirs.iter().map(|t| t.display().to_string()).collect();
+        let dst_paths: Vec<_> = args.dst_paths.iter().map(PathBuf::from).collect();
+        let lookup: HashMap<PathBuf, PathBuf> = dirs.into_iter().zip(dst_paths).collect();
+        let index = jbod::index_by_regex(&dirs_str, &group_by.clone().unwrap());
+        let index_len = index.len();
+        let translated: HashMap<String, PathBuf> = index.into_iter().filter_map(|(k, v)| lookup.get(&v).cloned().map(|new_v| (k, new_v))).collect();
+        ensure!(translated.len() == index_len, "Translation failed");
+        translated
+    } else {
+        HashMap::new()
+    };
+
     let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue, downloaded: 0, errors: 0, files_seen: 0, index }));
-    let worker_settings = WorkerSettings { endpoint: args.url.to_string(), auth: args.auth.to_string(), dst_paths: args.dst_paths, dry_run: args.dry_run, group_by: group_by };
+    let worker_settings = WorkerSettings { endpoint: args.url.to_string(), auth: args.auth.to_string(), dst_paths: args.dst_paths, dry_run: args.dry_run, group_by: group_by, index_preload };
 
     let mut workers: VecDeque<JoinHandle<()>> = VecDeque::new();
     for _ in 0..args.threads {
@@ -149,7 +170,14 @@ impl Worker {
             return abs_path;
         }
 
+        // --group-by and --group-by-preload specified
         let group_key: Option<String> = self.settings.group_by.as_ref().and_then(|regex| Self::make_group_key(regex, relpath));
+        if let Some(group_key) = &group_key {
+            if let Some(base) = self.settings.index_preload.get(group_key) {
+                return base.join(relpath);
+            }
+        }
+
         let mut state = self.state.lock().unwrap();
 
         // If --group-by is specified and this relpath is already indexed, use the same partition
