@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
 use crate::filelist::{ list_files_bfs, FileEntry };
+use regex::Regex;
 
 pub fn list_files(mount_points: &Vec<String>) -> Vec<FileEntry> {
     let mut file_sizes: HashMap<PathBuf, u64> = HashMap::new();
@@ -30,6 +31,24 @@ pub fn find_file(mount_points: &Vec<String>, rel_path: &PathBuf) -> Option<PathB
     candidates.pop()
 }
 
+type AbsPath = PathBuf;
+
+pub fn index_by_regex(paths: &Vec<String>, regex: &Regex) -> HashMap<String, AbsPath> {
+    let mut ret: Vec<(String, PathBuf)> = vec![];
+    for path in paths {
+        let path = std::path::Path::new(path);
+        for item in list_files_bfs(path).unwrap() {
+            let filename = item.relpath.file_name().unwrap().to_string_lossy();
+            let captures = regex.captures(&filename);
+            if let Some(captures) = captures {
+                let key: &str = &captures[if captures.len() > 1 { 1 } else { 0 }];
+                ret.push((key.into(), path.into()));
+            }
+        }
+    }
+    ret.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::{ tempdir, TempDir };
@@ -52,18 +71,33 @@ mod tests {
             let mount_point2 = tempdir_path.join("2");
             std::fs::create_dir_all(mount_point1.join("somedir"))?;
             std::fs::create_dir_all(mount_point2.join("somedir"))?;
-            std::fs::write(mount_point1.join("somedir/file.bin"), b"oneone")?;
-            std::fs::write(mount_point2.join("somedir/file.bin"), b"oneoneone")?;
-            std::fs::write(mount_point1.join("somedir/file2.bin"), b"twotwotwo")?;
-            std::fs::write(mount_point2.join("somedir/file2.bin"), b"twotwo")?;
             let mount_points = vec![mount_point1.to_str().unwrap().to_owned(), mount_point2.to_str().unwrap().to_owned()];
             Ok(Fixture { tempdir, mount_point1, mount_point2, mount_points })
+        }
+        fn test_merge_paths() -> Result<Fixture> {
+            let f = Fixture::create()?;
+            std::fs::write(f.mount_point1.join("somedir/file.bin"), b"oneone")?;
+            std::fs::write(f.mount_point2.join("somedir/file.bin"), b"oneoneone")?;
+            std::fs::write(f.mount_point1.join("somedir/file2.bin"), b"twotwotwo")?;
+            std::fs::write(f.mount_point2.join("somedir/file2.bin"), b"twotwo")?;
+            Ok(f)
+        }
+        fn test_regex_index() -> Result<Fixture> {
+            let f = Fixture::create()?;
+            std::fs::write(f.mount_point1.join("somedir/xlq7ocsbaxlm_h"), b"123456780")?;
+            std::fs::write(f.mount_point1.join("somedir/xlq7ocsbaxlm_n"), b"123456")?;
+            std::fs::write(f.mount_point1.join("somedir/xlq7ocsbaxlm_l"), b"123")?;
+            std::fs::write(f.mount_point2.join("somedir/5uglbek9o2or_h"), b"abcdefghjk")?;
+            std::fs::write(f.mount_point2.join("somedir/5uglbek9o2or_n"), b"abcdefg")?;
+            std::fs::write(f.mount_point2.join("somedir/5uglbek9o2or_l"), b"abc")?;
+            std::fs::write(f.mount_point2.join("somedir/s6rqxk"), b"123231")?;
+            Ok(f)
         }
     }
 
     #[test]
     fn test_list_files() {
-        let f = Fixture::create().unwrap();
+        let f = Fixture::test_merge_paths().unwrap();
         let mut res = list_files(&f.mount_points);
         res.sort_by_key(|x| x.relpath.clone());
 
@@ -75,9 +109,22 @@ mod tests {
 
     #[test]
     fn test_find_file() {
-        let f = Fixture::create().unwrap();
+        let f = Fixture::test_merge_paths().unwrap();
         assert_eq!(find_file(&f.mount_points, &PathBuf::from("somedir/file.bin")), Some(f.mount_point2.join("somedir/file.bin")));
         assert_eq!(find_file(&f.mount_points, &PathBuf::from("somedir/file2.bin")), Some(f.mount_point1.join("somedir/file2.bin")));
         assert_eq!(find_file(&f.mount_points, &PathBuf::from("somedir/file.txt")), None);
+    }
+
+    #[test]
+    fn test_index_by_regex() {
+        let f = Fixture::test_regex_index().unwrap();
+        let regex = Regex::new(r"^\w{12}").unwrap();
+        let index = index_by_regex(&f.mount_points, &regex);
+        assert_eq!(&index["xlq7ocsbaxlm"], &f.mount_point1);
+        assert_eq!(&index["5uglbek9o2or"], &f.mount_point2);
+
+        let regex_with_captures = Regex::new(r"^(\w{12})_([a-z])$").unwrap();
+        let index2 = index_by_regex(&f.mount_points, &regex);
+        assert_eq!(index2, index);
     }
 }

@@ -23,5 +23,7 @@ pub enum SubCommand {
         threads: u16,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long)]
+        group_by: Option<String>,
     },
 }

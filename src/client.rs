@@ -1,15 +1,16 @@
-use ureq::Agent;
 use anyhow::{ Result, Context, ensure };
 use serde_json;
 use crate::filelist::FileEntry;
 use crate::jbod;
 use std::path::PathBuf;
 use log::*;
+use regex::Regex;
 
 use std::fs::File;
 use std::collections::VecDeque;
 use std::sync::{ Arc, Mutex };
 use std::thread::JoinHandle;
+use std::collections::HashMap;
 
 struct SharedState {
     counter: usize,
@@ -17,6 +18,9 @@ struct SharedState {
     downloaded: u64,
     errors: u64,
     files_seen: u64,
+
+    // group by
+    index: HashMap<String, PathBuf>,
 }
 
 #[derive(Clone)]
@@ -25,11 +29,12 @@ struct WorkerSettings {
     auth: String,
     dst_paths: Vec<String>,
     dry_run: bool,
+    group_by: Option<Regex>,
 }
 
 enum DlStatus { NothingToDo, Completed }
 
-pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16, dry_run: bool) -> Result<()> {
+pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16, dry_run: bool, group_by: Option<String>) -> Result<()> {
     info!("Fetching file list");
     let agent = ureq::agent();
     let list = agent
@@ -38,13 +43,25 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16, d
         .call()?.body_mut().with_config().limit(u64::MAX).read_to_string()?;
     let queue: VecDeque<FileEntry> = serde_json::from_str(&list)?;
     let files_matched = queue.len();
-    let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue, downloaded: 0, errors: 0, files_seen: 0 }));
-    let worker_settings = WorkerSettings { endpoint: url.to_string(), auth: auth.to_string(), dst_paths, dry_run };
+
+    let group_by = group_by.as_deref().map(Regex::new).transpose().context("regex compilation")?;
+    let index = if let Some(regex) = &group_by {
+        info!("Building directory index (--group-by)");
+        jbod::index_by_regex(&dst_paths, regex)
+    } else {
+        HashMap::new()
+    };
+
+    let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue, downloaded: 0, errors: 0, files_seen: 0, index }));
+    let worker_settings = WorkerSettings { endpoint: url.to_string(), auth: auth.to_string(), dst_paths, dry_run, group_by };
+
     let mut workers: VecDeque<JoinHandle<()>> = VecDeque::new();
     for _ in 0..threads {
         let shared_state = shared_state.clone();
         let worker_settings = worker_settings.clone();
-        workers.push_back(std::thread::spawn(move || { worker(shared_state, &worker_settings); }));
+        workers.push_back(std::thread::spawn(move || {
+            Worker::new(shared_state, worker_settings).run();
+        }));
     }
     while let Some(thread) = workers.pop_front() {
         thread.join().unwrap();
@@ -64,62 +81,103 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16, d
     Ok(())
 }
 
-fn worker(state: Arc<Mutex<SharedState>>, settings: &WorkerSettings) {
-    let next_item = || state.lock().unwrap().queue.pop_front();
-    let next_path = || {
-        let mut state = state.lock().unwrap();
-        let idx = state.counter % settings.dst_paths.len();
+struct Worker {
+    state: Arc<Mutex<SharedState>>,
+    settings: WorkerSettings,
+    agent: ureq::Agent,
+}
+
+type AbsPath = PathBuf;
+
+impl Worker {
+    fn new(state: Arc<Mutex<SharedState>>, settings: WorkerSettings) -> Worker {
+        Worker { state, settings, agent: ureq::agent() }
+    }
+    fn run(&mut self) {
+       while let Some(item) = self.next_item() {
+           let download_url = format!("{}/download/{}", &self.settings.endpoint, item.relpath.display());
+           let dst_path = self.dst_file_path(&item.relpath);
+           let result = self.download(&download_url, &dst_path, item.size);
+           if let Err(err) = &result {
+               error!("File download failed: {} {:#}", dst_path.display(), err);
+           }
+
+           let mut state = self.state.lock().unwrap();
+           state.files_seen += 1;
+           match result {
+               Ok(DlStatus::Completed) => state.downloaded+=1,
+               Ok(DlStatus::NothingToDo) => {},
+               Err(_) => state.errors+=1,
+           }
+       }
+    }
+    fn download(&self, download_url: &str, dst_path: &PathBuf, expected_size: u64) -> Result<DlStatus> {
+        let exists = std::fs::exists(&dst_path).unwrap_or(false);
+        if exists && std::fs::metadata(&dst_path)?.len() == expected_size {
+            info!("File already completed: {}", dst_path.display());
+            return Ok(DlStatus::NothingToDo);
+        }
+
+        info!("Downloading URL: {} => {}", download_url, dst_path.display());
+
+        if self.settings.dry_run {
+            return Ok(DlStatus::Completed);
+        }
+
+        if let Some(parent) = dst_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut response = self.agent.get(download_url)
+            .header("Authorization", &format!("Bearer {}", self.settings.auth))
+            .call().context("HTTP Request failed")?;
+        ensure!(response.status() == 200, "Wrong response status: {}", response.status());
+
+        let mut reader = response.body_mut().as_reader();
+        let mut file = File::create(dst_path)?;
+        std::io::copy(&mut reader, &mut file)?;
+
+        let file_size = std::fs::metadata(&dst_path)?.len();
+        ensure!(file_size == expected_size,  "Filesize check failed: {expected_size} bytes expected, {file_size} received");
+
+        Ok(DlStatus::Completed)
+    }
+    fn dst_file_path(&mut self, relpath: &PathBuf) -> AbsPath {
+        // File already exists in one of partitions, so just return it's absolute path
+        if let Some(abs_path) = jbod::find_file(&self.settings.dst_paths, relpath) {
+            return abs_path;
+        }
+
+        let group_key: Option<String> = self.settings.group_by.as_ref().and_then(|regex| Self::make_group_key(regex, relpath));
+        let mut state = self.state.lock().unwrap();
+
+        // If --group-by is specified and this relpath is already indexed, use the same partition
+        if let Some(group_key) = &group_key {
+            if let Some(base) = state.index.get(group_key) {
+                return base.join(relpath);
+            }
+        }
+
+        // Use round robin if nothing above worked
+        let idx = state.counter % self.settings.dst_paths.len();
         state.counter += 1;
-        PathBuf::from(&settings.dst_paths[idx])
-    };
-    let agent = ureq::agent();
-    while let Some(item) = next_item() {
-        let download_url = format!("{}/download/{}", &settings.endpoint, item.relpath.display());
-        let round_robin = || next_path().join(&item.relpath);
-        let dst_path = jbod::find_file(&settings.dst_paths, &item.relpath).unwrap_or_else(round_robin);
-        let result = download(&agent, &settings.auth, &download_url, &dst_path, item.size, settings.dry_run);
-        if let Err(err) = &result {
-            error!("File download failed: {} {:#}", dst_path.display(), err);
+        let dst_path = PathBuf::from(&self.settings.dst_paths[idx]);
+
+        if let Some(group_key) = group_key {
+            state.index.entry(group_key).or_insert_with(|| dst_path.clone());
         }
 
-        let mut state = state.lock().unwrap();
-        state.files_seen += 1;
-        match result {
-            Ok(DlStatus::Completed) => state.downloaded+=1,
-            Ok(DlStatus::NothingToDo) => {},
-            Err(_) => state.errors+=1,
-        }
+        dst_path.join(relpath)
+    }
+    fn make_group_key(regex: &Regex, relpath: &PathBuf) -> Option<String> {
+        let filename = relpath.file_name().unwrap().to_string_lossy();
+        let captures = regex.captures(&filename)?;
+        let key: &str = &captures[if captures.len() > 1 { 1 } else { 0 }];
+        Some(key.into())
+    }
+    fn next_item(&mut self) -> Option<FileEntry> {
+        self.state.lock().unwrap().queue.pop_front()
     }
 }
 
-fn download(agent: &Agent, auth: &str, download_url: &str, dst_path: &PathBuf, expected_size: u64, dry_run: bool) -> Result<DlStatus> {
-    let exists = std::fs::exists(&dst_path).unwrap_or(false);
-    if exists && std::fs::metadata(&dst_path)?.len() == expected_size {
-        info!("File already completed: {}", dst_path.display());
-        return Ok(DlStatus::NothingToDo);
-    }
 
-    info!("Downloading URL: {} => {}", download_url, dst_path.display());
-
-    if dry_run {
-        return Ok(DlStatus::Completed);
-    }
-
-    if let Some(parent) = dst_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut response = agent.get(download_url)
-        .header("Authorization", &format!("Bearer {auth}"))
-        .call().context("HTTP Request failed")?;
-    ensure!(response.status() == 200, "Wrong response status: {}", response.status());
-
-    let mut reader = response.body_mut().as_reader();
-    let mut file = File::create(dst_path)?;
-    std::io::copy(&mut reader, &mut file)?;
-
-    let file_size = std::fs::metadata(&dst_path)?.len();
-    ensure!(file_size == expected_size,  "Filesize check failed: {expected_size} bytes expected, {file_size} received");
-
-    Ok(DlStatus::Completed)
-}
