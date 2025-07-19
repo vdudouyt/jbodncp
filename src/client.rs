@@ -24,6 +24,7 @@ struct WorkerSettings {
 }
 
 pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -> Result<()> {
+    info!("Fetching file list");
     let agent = ureq::agent();
     let list = agent
         .get(&format!("{url}/list"))
@@ -41,6 +42,7 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16) -
     while let Some(thread) = workers.pop_front() {
         thread.join().unwrap();
     }
+    info!("Everything is done");
     Ok(())
 }
 
