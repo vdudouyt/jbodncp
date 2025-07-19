@@ -1,4 +1,4 @@
-use clap::{ Parser, Subcommand };
+use clap::{ Parser, Subcommand, Args };
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -14,16 +14,19 @@ pub enum SubCommand {
         #[arg(long, default_value_t=3000)]
         port: u16,
     },
-    Download {
-        url: String,
-        dst_paths: Vec<String>,
-        #[arg(long)]
-        auth: String,
-        #[arg(long, default_value_t=16)]
-        threads: u16,
-        #[arg(long)]
-        dry_run: bool,
-        #[arg(long)]
-        group_by: Option<String>,
-    },
+    Download(#[clap(flatten)] DownloadConfig),
+}
+
+#[derive(Args, Debug)]
+pub struct DownloadConfig {
+    pub url: String,
+    pub dst_paths: Vec<String>,
+    #[arg(long)]
+    pub auth: String,
+    #[arg(long, default_value_t=16)]
+    pub threads: u16,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub group_by: Option<String>,
 }

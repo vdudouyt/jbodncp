@@ -2,6 +2,7 @@ use anyhow::{ Result, Context, ensure };
 use serde_json;
 use crate::filelist::FileEntry;
 use crate::jbod;
+use crate::cli::DownloadConfig;
 use std::path::PathBuf;
 use log::*;
 use regex::Regex;
@@ -34,29 +35,29 @@ struct WorkerSettings {
 
 enum DlStatus { NothingToDo, Completed }
 
-pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16, dry_run: bool, group_by: Option<String>) -> Result<()> {
+pub fn run_client(args: DownloadConfig) -> Result<()> {
     info!("Fetching file list");
     let agent = ureq::agent();
     let list = agent
-        .get(&format!("{url}/list"))
-        .header("Authorization", &format!("Bearer {auth}"))
+        .get(&format!("{}/list", args.url))
+        .header("Authorization", &format!("Bearer {}", args.auth))
         .call()?.body_mut().with_config().limit(u64::MAX).read_to_string()?;
     let queue: VecDeque<FileEntry> = serde_json::from_str(&list)?;
     let files_matched = queue.len();
 
-    let group_by = group_by.as_deref().map(Regex::new).transpose().context("regex compilation")?;
+    let group_by = args.group_by.as_deref().map(Regex::new).transpose().context("regex compilation")?;
     let index = if let Some(regex) = &group_by {
         info!("Building directory index (--group-by)");
-        jbod::index_by_regex(&dst_paths, regex)
+        jbod::index_by_regex(&args.dst_paths, regex)
     } else {
         HashMap::new()
     };
 
     let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue, downloaded: 0, errors: 0, files_seen: 0, index }));
-    let worker_settings = WorkerSettings { endpoint: url.to_string(), auth: auth.to_string(), dst_paths, dry_run, group_by };
+    let worker_settings = WorkerSettings { endpoint: args.url.to_string(), auth: args.auth.to_string(), dst_paths: args.dst_paths, dry_run: args.dry_run, group_by: group_by };
 
     let mut workers: VecDeque<JoinHandle<()>> = VecDeque::new();
-    for _ in 0..threads {
+    for _ in 0..args.threads {
         let shared_state = shared_state.clone();
         let worker_settings = worker_settings.clone();
         workers.push_back(std::thread::spawn(move || {
@@ -74,7 +75,7 @@ pub fn run_client(url: &str, dst_paths: Vec<String>, auth: &str, threads: u16, d
     if state.errors > 0 {
         warn!("Some transfers were completed with errors");
     }
-    if dry_run {
+    if args.dry_run {
         warn!("Dry run requested, so no downloads actually performed");
     }
     info!("Everything is done. Files seen: {} downloaded: {} errors: {}", state.files_seen, state.downloaded, state.errors);
