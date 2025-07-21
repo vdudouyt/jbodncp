@@ -3,6 +3,7 @@ mod cli;
 mod client;
 mod server;
 mod jbod;
+mod disk_space;
 
 use clap::Parser;
 use client::run_client;

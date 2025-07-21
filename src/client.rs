@@ -3,10 +3,12 @@ use serde_json;
 use crate::filelist::FileEntry;
 use crate::jbod;
 use crate::cli::DownloadConfig;
+use crate::disk_space::get_available_space;
 use std::path::PathBuf;
 use log::*;
 use glob::glob;
 use regex::Regex;
+use rand::Rng;
 
 use std::fs::File;
 use std::collections::VecDeque;
@@ -15,7 +17,6 @@ use std::thread::JoinHandle;
 use std::collections::HashMap;
 
 struct SharedState {
-    counter: usize,
     queue: VecDeque<FileEntry>,
     downloaded: u64,
     errors: u64,
@@ -74,7 +75,7 @@ pub fn run_client(args: DownloadConfig) -> Result<()> {
         HashMap::new()
     };
 
-    let shared_state = Arc::new(Mutex::new(SharedState { counter: 0, queue, downloaded: 0, errors: 0, files_seen: 0, index }));
+    let shared_state = Arc::new(Mutex::new(SharedState { queue, downloaded: 0, errors: 0, files_seen: 0, index }));
     let worker_settings = WorkerSettings { endpoint: args.url.to_string(), auth: args.auth.to_string(), dst_paths: args.dst_paths, dry_run: args.dry_run, group_by: group_by, index_preload };
 
     let mut workers: VecDeque<JoinHandle<()>> = VecDeque::new();
@@ -118,7 +119,11 @@ impl Worker {
     fn run(&mut self) {
        while let Some(item) = self.next_item() {
            let download_url = format!("{}/download/{}", &self.settings.endpoint, item.relpath.display());
-           let dst_path = self.dst_file_path(&item.relpath);
+           let Some(dst_path) = self.dst_file_path(&item) else {
+               error!("No available disks left");
+               return;
+           };
+
            let result = self.download(&download_url, &dst_path, item.size);
            if let Err(err) = &result {
                error!("File download failed: {} {:#}", dst_path.display(), err);
@@ -164,39 +169,43 @@ impl Worker {
 
         Ok(DlStatus::Completed)
     }
-    fn dst_file_path(&mut self, relpath: &PathBuf) -> AbsPath {
+    fn dst_file_path(&mut self, item: &FileEntry) -> Option<AbsPath> {
         // File already exists in one of partitions, so just return it's absolute path
-        if let Some(abs_path) = jbod::find_file(&self.settings.dst_paths, relpath) {
-            return abs_path;
+        if let Some(abs_path) = jbod::find_file(&self.settings.dst_paths, &item.relpath) {
+            return Some(abs_path);
         }
 
         // --group-by and --group-by-preload specified
-        let group_key: Option<String> = self.settings.group_by.as_ref().and_then(|regex| Self::make_group_key(regex, relpath));
+        let group_key: Option<String> = self.settings.group_by.as_ref().and_then(|regex| Self::make_group_key(regex, &item.relpath));
         if let Some(group_key) = &group_key {
             if let Some(base) = self.settings.index_preload.get(group_key) {
-                return base.join(relpath);
+                return Some(base.join(&item.relpath));
             }
         }
+
+        let disk_spaces: Vec<_> = self.settings.dst_paths.iter()
+            .map(|path| (path, get_available_space(&PathBuf::from(path)).unwrap_or(0)))
+            .filter(|(_path, disk_space)| *disk_space > item.size)
+            .collect();
 
         let mut state = self.state.lock().unwrap();
 
         // If --group-by is specified and this relpath is already indexed, use the same partition
         if let Some(group_key) = &group_key {
             if let Some(base) = state.index.get(group_key) {
-                return base.join(relpath);
+                return Some(base.join(&item.relpath));
             }
         }
 
-        // Use round robin if nothing above worked
-        let idx = state.counter % self.settings.dst_paths.len();
-        state.counter += 1;
-        let dst_path = PathBuf::from(&self.settings.dst_paths[idx]);
+        // Roll dice if nothing above worked
+        let dst_path = roll_weighed_dice(&disk_spaces)?;
+        let dst_path = PathBuf::from(dst_path);
 
         if let Some(group_key) = group_key {
             state.index.entry(group_key).or_insert_with(|| dst_path.clone());
         }
 
-        dst_path.join(relpath)
+        Some(dst_path.join(&item.relpath))
     }
     fn make_group_key(regex: &Regex, relpath: &PathBuf) -> Option<String> {
         let filename = relpath.file_name().unwrap().to_string_lossy();
@@ -209,4 +218,15 @@ impl Worker {
     }
 }
 
-
+fn roll_weighed_dice<'a>(input: &'a Vec<(&'a String, u64)>) -> Option<&'a str> {
+    let total_space: u64 = input.iter().map(|(_, space)| space).sum();
+    let mut rng = rand::rng();
+    let mut choice = rng.random_range(0..total_space);
+    for (mount, space) in input {
+        if choice < *space {
+            return Some(mount.as_ref());
+        }
+        choice -= space;
+    }
+    Some(input.first()?.0)
+}
