@@ -41,6 +41,11 @@ struct WorkerSettings {
 enum DlStatus { NothingToDo, Completed }
 
 pub fn run_client(args: DownloadConfig) -> Result<()> {
+    for dst_path in &args.dst_paths {
+        ensure!(std::fs::exists(dst_path)?, "Directory not exists: {}", dst_path);
+        ensure!(std::fs::metadata(dst_path)?.is_dir(), "Not a directory: {}", dst_path);
+    }
+
     info!("Fetching file list");
     let agent = ureq::agent();
     let list = agent
